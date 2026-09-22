@@ -7172,103 +7172,281 @@ function saveAdminAuthEmail(email){
 }
 
 async function kopalinkAuthLogin(){
-  const username=document.getElementById("loginUsername")?.value.trim();
-  const password=document.getElementById("loginPassword")?.value||"";
-  if(!username||!password){toast("Enter username and password");return;}
 
-  const btn=document.querySelector(".auth-login-btn");
-  if(btn){btn.disabled=true;btn.dataset.oldText=btn.innerHTML;btn.innerHTML="Signing in...";}
+  const username =
+    document.getElementById("loginUsername")?.value.trim();
+
+  const password =
+    document.getElementById("loginPassword")?.value || "";
+
+  if(!username || !password){
+    toast("Enter username and password");
+    return;
+  }
+
+  const btn =
+    document.querySelector(".auth-login-btn");
+
+  if(btn){
+    btn.disabled = true;
+    btn.dataset.oldText = btn.innerHTML;
+    btn.innerHTML = "Signing in...";
+  }
 
   try{
-    const admin=getAdmin();
-    const isLocalAdmin=
-      username.toLowerCase()===String(admin.username||"").toLowerCase() &&
-      password===String(admin.password||"") &&
-      admin.active!==false;
 
-    // IMPORTANT: the Admin account uses the REAL email created in
-    // Supabase Authentication. Officers/clients continue using their
-    // KopaLink username-based Auth email.
-    let email=authEmailForUsername(username);
+    const admin = getAdmin();
+
+    const isLocalAdmin =
+      username.toLowerCase() ===
+        String(admin.username || "").toLowerCase() &&
+      password ===
+        String(admin.password || "") &&
+      admin.active !== false;
+
+    let email =
+      authEmailForUsername(username);
+
     if(isLocalAdmin){
-      const realAdminEmail=getSavedAdminAuthEmail();
-      if(realAdminEmail) email=realAdminEmail;
-    }
 
-    let authResult=await kopaAdminDB.auth.signInWithPassword({email,password});
+      const realAdminEmail =
+        getSavedAdminAuthEmail();
 
-    // If the normal username email failed for the local Admin account,
-    // use the real Admin Auth email saved during the one-time connection.
-    if((authResult.error || !authResult.data?.user) && isLocalAdmin){
-      const saved=getSavedAdminAuthEmail();
-      if(saved && saved!==email){
-        authResult=await kopaAdminDB.auth.signInWithPassword({email:saved,password});
+      if(realAdminEmail){
+        email = realAdminEmail;
       }
     }
 
-    const {data,error}=authResult;
+    const {
+      data,
+      error
+    } =
+      await kopaAdminDB.auth.signInWithPassword({
+        email: email,
+        password: password
+      });
 
-    if(!error && data?.user){
-      let profile=null;
-      try{
-        const result=await kopaAdminDB
-          .from("profiles")
-          .select("id,full_name,username,phone,role,active")
-          .eq("id",data.user.id)
-          .maybeSingle();
-        profile=result.data||null;
-      }catch(profileError){
-        console.warn("Profile lookup failed",profileError);
-      }
+    if(error || !data?.user){
+      throw error ||
+        new Error("Invalid username or password");
+    }
 
-      const meta=data.user.user_metadata||{};
-      profile=profile||{
-        id:data.user.id,
-        full_name:meta.full_name||username,
-        username:meta.username||username,
-        phone:meta.phone||"",
-        role:meta.role||"client",
-        active:true
-      };
+    const {
+      data: profile,
+      error: profileError
+    } =
+      await kopaAdminDB
+        .from("profiles")
+        .select(
+          "id,full_name,username,phone,role,active"
+        )
+        .eq("id", data.user.id)
+        .maybeSingle();
 
-      if(profile.active===false){
-        await kopaAdminDB.auth.signOut();
-        toast("This account is inactive");
-        return;
-      }
+    if(profileError){
+      await kopaAdminDB.auth.signOut();
+      throw new Error(
+        "Could not load KopaLink profile: " +
+        profileError.message
+      );
+    }
 
-      clearSession();
-      const role=String(profile.role||"client").toLowerCase();
+    if(!profile){
+      await kopaAdminDB.auth.signOut();
+      throw new Error(
+        "KopaLink profile not found for this account"
+      );
+    }
 
-      if(role==="admin"||role==="administrator"||role==="super admin"){
-        if(isLocalAdmin) saveAdminAuthEmail(email);
-        localStorage.setItem(ADMIN_SESSION_KEY,"true");
-        localStorage.setItem("KOPALINK_AUTH_USER",JSON.stringify(profile));
-        showAdminApp();
-      }else if(role==="officer"||role==="relationship officer"){
-        setSession({type:"officer",id:profile.id,user_id:data.user.id});
-        localStorage.setItem(CURRENT_OFFICER_KEY,JSON.stringify({
-          id:profile.id,name:profile.full_name,username:profile.username,
-          phone:profile.phone,active:profile.active!==false
-        }));
-        showOfficerApp();
-      }else{
-        setSession({type:"client",id:profile.id,user_id:data.user.id});
-        localStorage.setItem(CURRENT_USER_KEY,JSON.stringify({
-          id:profile.id,name:profile.full_name,username:profile.username,
-          phone:profile.phone,active:profile.active!==false
-        }));
-        showClientApp();
-      }
+    if(profile.active === false){
+      await kopaAdminDB.auth.signOut();
+      throw new Error(
+        "This KopaLink account is inactive"
+      );
+    }
+
+    const role =
+      String(profile.role || "")
+        .trim()
+        .toLowerCase();
+
+    if(
+      role === "admin" ||
+      role === "administrator" ||
+      role === "super admin"
+    ){
+
+      localStorage.setItem(
+        ADMIN_SESSION_KEY,
+        "true"
+      );
+
+      localStorage.setItem(
+        "KOPALINK_AUTH_USER",
+        JSON.stringify({
+          id: data.user.id,
+          full_name: profile.full_name,
+          username: profile.username,
+          phone: profile.phone,
+          role: role,
+          active: profile.active !== false
+        })
+      );
+
+      showAdminApp();
       return;
     }
 
-    throw error||new Error("Invalid username or password");
+    if(
+      role === "officer" ||
+      role === "relationship officer"
+    ){
+
+      const officers =
+        getOfficers();
+
+      let officer =
+        officers.find(
+          o =>
+            String(o.id) ===
+            String(profile.id)
+        );
+
+      if(!officer){
+        officer =
+          officers.find(
+            o =>
+              String(o.username || "")
+                .toLowerCase() ===
+              String(profile.username || "")
+                .toLowerCase()
+          );
+      }
+
+      if(!officer){
+
+        officer = {
+          id: profile.id,
+          name:
+            profile.full_name ||
+            profile.username ||
+            "Officer",
+          username:
+            profile.username || "",
+          phone:
+            profile.phone || "",
+          active:
+            profile.active !== false,
+          createdAt:
+            todayISO()
+        };
+
+        officers.push(officer);
+        saveOfficers(officers);
+
+      }else{
+
+        officer.id =
+          profile.id;
+
+        officer.name =
+          profile.full_name ||
+          officer.name;
+
+        officer.username =
+          profile.username ||
+          officer.username;
+
+        officer.phone =
+          profile.phone ||
+          officer.phone ||
+          "";
+
+        officer.active =
+          profile.active !== false;
+
+        saveOfficers(officers);
+      }
+
+      clearSession();
+
+      setSession({
+        type: "officer",
+        id: profile.id,
+        user_id: data.user.id
+      });
+
+      localStorage.setItem(
+        CURRENT_OFFICER_KEY,
+        JSON.stringify({
+          id: profile.id,
+          name: profile.full_name,
+          username: profile.username,
+          phone: profile.phone,
+          active: profile.active !== false
+        })
+      );
+
+      showOfficerApp();
+      return;
+    }
+
+    if(role === "client"){
+
+      clearSession();
+
+      setSession({
+        type: "client",
+        id: profile.id,
+        user_id: data.user.id
+      });
+
+      localStorage.setItem(
+        CURRENT_USER_KEY,
+        JSON.stringify({
+          id: profile.id,
+          name: profile.full_name,
+          username: profile.username,
+          phone: profile.phone,
+          active: profile.active !== false
+        })
+      );
+
+      showClientApp();
+      return;
+    }
+
+    await kopaAdminDB.auth.signOut();
+
+    throw new Error(
+      "This account has no valid KopaLink role"
+    );
+
   }catch(e){
-    console.error(e);
-    toast("Login failed: "+(e.message||"Check username and password"));
+
+    console.error(
+      "KopaLink Supabase login error:",
+      e
+    );
+
+    toast(
+      "Login failed: " +
+      (
+        e?.message ||
+        "Check username and password"
+      )
+    );
+
   }finally{
-    if(btn){btn.disabled=false;btn.innerHTML=btn.dataset.oldText||"Login";}
+
+    if(btn){
+
+      btn.disabled = false;
+
+      btn.innerHTML =
+        btn.dataset.oldText ||
+        "Login";
+    }
   }
 }
 
