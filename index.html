@@ -1908,6 +1908,11 @@ const ADMIN_AUDIT_KEY="kopaLinkAdminAudit";
 
 const NOTIFICATIONS_KEY="kopaLinkNotifications";
 const PAYMENTS_KEY="kopaLinkPayments";
+const LOAN_SETTINGS_KEY="kopaLinkLoanSettings";
+const DEFAULT_LOAN_SETTINGS={weeklyRate:5,minAmount:1000,maxAmount:50000,minWeeks:1,maxWeeks:12};
+function getLoanSettings(){return {...DEFAULT_LOAN_SETTINGS,...JSON.parse(localStorage.getItem(LOAN_SETTINGS_KEY)||"{}")};}
+function saveLoanSettings(settings){localStorage.setItem(LOAN_SETTINGS_KEY,JSON.stringify(settings));}
+
 
 
 function getUsers(){
@@ -2509,7 +2514,7 @@ function calculateLoan(){
     return;
   }
 
-  const rate=.05;
+  const rate=getLoanSettings().weeklyRate/100;
 
   const interest=amount*rate*weeks;
   const total=amount+interest;
@@ -2521,7 +2526,7 @@ function calculateLoan(){
 
       <div class="loan-line">
         <span>Interest</span>
-        <strong>${money(interest)} (5% weekly)</strong>
+        <strong>${money(interest)} (${getLoanSettings().weeklyRate}% weekly)</strong>
       </div>
 
       <div class="loan-line">
@@ -2566,22 +2571,23 @@ function submitLoanRequest(){
     document.getElementById("loanDuration").value
   );
 
-  if(!amount || amount<1000){
-    toast("Minimum loan is KES 1,000");
+  const cfg=getLoanSettings();
+  if(!amount || amount<cfg.minAmount){
+    toast("Minimum loan is KES "+cfg.minAmount.toLocaleString());
     return;
   }
 
-  if(amount>50000){
-    toast("Maximum loan is KES 50,000");
+  if(amount>cfg.maxAmount){
+    toast("Maximum loan is KES "+cfg.maxAmount.toLocaleString());
     return;
   }
 
-  if(weeks<1 || weeks>12){
-    toast("Duration must be 1 to 12 weeks");
+  if(weeks<cfg.minWeeks || weeks>cfg.maxWeeks){
+    toast("Duration must be between "+cfg.minWeeks+" and "+cfg.maxWeeks+" weeks");
     return;
   }
 
-  const interest=amount*.05*weeks;
+  const interest=amount*(cfg.weeklyRate/100)*weeks;
   const total=amount+interest;
   const weekly=total/weeks;
 
@@ -2834,8 +2840,8 @@ function renderRequest(){
           id="loanAmount"
           class="input"
           type="number"
-          min="1000"
-          max="50000"
+          min="${getLoanSettings().minAmount}"
+          max="${getLoanSettings().maxAmount}"
           value="10000"
           oninput="calculateLoan()"
         >
@@ -2852,18 +2858,7 @@ function renderRequest(){
           class="input"
           onchange="calculateLoan()">
 
-          <option value="1">1 Week</option>
-          <option value="2">2 Weeks</option>
-          <option value="3">3 Weeks</option>
-          <option value="4" selected>4 Weeks</option>
-          <option value="5">5 Weeks</option>
-          <option value="6">6 Weeks</option>
-          <option value="7">7 Weeks</option>
-          <option value="8">8 Weeks</option>
-          <option value="9">9 Weeks</option>
-          <option value="10">10 Weeks</option>
-          <option value="11">11 Weeks</option>
-          <option value="12">12 Weeks</option>
+          ${Array.from({length:getLoanSettings().maxWeeks-getLoanSettings().minWeeks+1},(_,i)=>i+getLoanSettings().minWeeks).map(w=>`<option value="${w}" ${w===4?"selected":""}>${w} Week${w===1?"":"s"}</option>`).join("")}
 
         </select>
 
@@ -3820,8 +3815,9 @@ function renderOfficerDashboard(){
   );
 
   const disbursement=approved.filter(
-    u=>u.loan.disbursed!==true
+    u=>u.loan.disbursed===true
   );
+  const awaitingDisbursement=approved.filter(u=>u.loan.disbursed!==true);
 
   document.getElementById("officerContent").innerHTML=`
 
@@ -3852,7 +3848,7 @@ function renderOfficerDashboard(){
 
       <div class="stat-card">
         <div class="stat-icon">💵</div>
-        <small>Disbursement</small>
+        <small>Disbursed Loans</small>
         <strong>${disbursement.length}</strong>
       </div>
 
@@ -4400,47 +4396,7 @@ function renderOfficerLoans(){
             <strong>${money(client.loan.total)}</strong>
           </div>
 
-          <div class="loan-actions">
-
-            ${
-              client.loan.status==="Pending"
-              ?
-              `
-              <button
-                class="small-btn"
-                style="background:#e6f7ef;color:#087f52"
-                onclick="officerApproveLoan('${client.id}')">
-                Approve
-              </button>
-
-              <button
-                class="small-btn"
-                style="background:#fff0ef;color:#c52e29"
-                onclick="officerRejectLoan('${client.id}')">
-                Reject
-              </button>
-              `
-              :
-              ""
-            }
-
-            ${
-              client.loan.status==="Approved" &&
-              client.loan.disbursed!==true
-              ?
-              `
-              <button
-                class="small-btn"
-                style="background:#edf5ff;color:#1762aa"
-                onclick="disburseLoan('${client.id}')">
-                Disburse Loan
-              </button>
-              `
-              :
-              ""
-            }
-
-          </div>
+          <div class="loan-actions"><small>Loan decisions and disbursement are handled by the administrator.</small></div>
 
         </div>
 
@@ -4460,78 +4416,9 @@ function renderOfficerLoans(){
    OFFICER APPROVAL
 ============================================================ */
 
-function officerApproveLoan(clientId){
+function officerApproveLoan(clientId){toast("Only an administrator can perform this action");}
 
-  const client=getUsers().find(
-    u=>u.id===clientId
-  );
-
-  if(!client || !client.loan)return;
-
-  if(client.loan.status!=="Pending"){
-    toast("Loan is not pending");
-    return;
-  }
-
-  client.loan.status="Approved";
-  client.loan.approved=true;
-  client.loan.approvedDate=todayISO();
-  client.loan.startDate=todayISO();
-  client.loan.disbursed=false;
-  client.loan.schedule=buildSchedule(client.loan);
-
-  updateClient(client.id,{
-    loan:client.loan
-  });
-
-  sendNotification(
-    "client",
-    client.id,
-    "Loan Approved",
-    "Your loan of "+money(client.loan.amount)+" has been approved and is awaiting disbursement."
-  );
-
-  adminAudit(
-    "Loan approved by officer",
-    client.name+" - "+client.loan.id
-  );
-
-  toast("Loan approved");
-
-  renderOfficerLoans();
-}
-
-function officerRejectLoan(clientId){
-
-  const client=getUsers().find(
-    u=>u.id===clientId
-  );
-
-  if(!client || !client.loan)return;
-
-  client.loan.status="Rejected";
-  client.loan.rejectedDate=todayISO();
-
-  updateClient(client.id,{
-    loan:client.loan
-  });
-
-  sendNotification(
-    "client",
-    client.id,
-    "Loan Application Rejected",
-    "Your loan application of "+money(client.loan.amount)+" was not approved."
-  );
-
-  adminAudit(
-    "Loan rejected by officer",
-    client.name+" - "+client.loan.id
-  );
-
-  toast("Loan rejected");
-
-  renderOfficerLoans();
-}
+function officerRejectLoan(clientId){toast("Only an administrator can perform this action");}
 
 
 /* ============================================================
@@ -4610,7 +4497,7 @@ function renderOfficerDisbursement(){
             :
             `<button
               class="primary"
-              onclick="disburseLoan('${client.id}')">
+              onclick="alert('Only an administrator can disburse loans.')">
               Confirm Disbursement
             </button>`
           }
@@ -4629,47 +4516,7 @@ function renderOfficerDisbursement(){
   `;
 }
 
-function disburseLoan(clientId){
-
-  const client=getUsers().find(
-    u=>u.id===clientId
-  );
-
-  if(!client || !client.loan)return;
-
-  if(client.loan.status!=="Approved"){
-    toast("Only approved loans can be disbursed");
-    return;
-  }
-
-  if(client.loan.disbursed===true){
-    toast("Loan already disbursed");
-    return;
-  }
-
-  client.loan.disbursed=true;
-  client.loan.disbursedDate=todayISO();
-
-  updateClient(client.id,{
-    loan:client.loan
-  });
-
-  sendNotification(
-    "client",
-    client.id,
-    "Loan Disbursed",
-    "Your approved loan of "+money(client.loan.amount)+" has been disbursed. Repayments can now be made according to your schedule."
-  );
-
-  adminAudit(
-    "Loan disbursed",
-    client.name+" - "+client.loan.id
-  );
-
-  toast("Loan disbursed successfully");
-
-  renderOfficerDisbursement();
-}
+function disburseLoan(clientId){toast("Only an administrator can perform this action");}
 
 
 /* ============================================================
@@ -5681,6 +5528,10 @@ function adminApproveLoan(clientId){
 
   if(!client?.loan)return;
 
+  const reason=prompt("Enter the reason for approving this loan:");
+  if(!reason || !reason.trim()){toast("Approval reason is required");return;}
+  client.loan.approvalReason=reason.trim();
+  client.loan.approvedBy=getAdmin()?.name||"Administrator";
   client.loan.status="Approved";
   client.loan.approved=true;
   client.loan.approvedDate=todayISO();
@@ -5701,7 +5552,7 @@ function adminApproveLoan(clientId){
 
   adminAudit(
     "Loan approved",
-    client.name+" "+client.loan.id
+    client.name+" "+client.loan.id+" | Reason: "+reason.trim()
   );
 
   toast("Loan approved");
@@ -5716,6 +5567,10 @@ function adminRejectLoan(clientId){
   );
 
   if(!client?.loan)return;
+  const reason=prompt("Enter the reason for rejecting this loan:");
+  if(!reason || !reason.trim()){toast("Rejection reason is required");return;}
+  client.loan.rejectionReason=reason.trim();
+  client.loan.rejectedBy=getAdmin()?.name||"Administrator";
 
   client.loan.status="Rejected";
   client.loan.rejectedDate=todayISO();
@@ -5733,7 +5588,7 @@ function adminRejectLoan(clientId){
 
   adminAudit(
     "Loan rejected",
-    client.name+" "+client.loan.id
+    client.name+" "+client.loan.id+" | Reason: "+reason.trim()
   );
 
   toast("Loan rejected");
@@ -6789,6 +6644,12 @@ function renderAdminAudit(){
    ADMIN SETTINGS
 ============================================================ */
 
+function saveAdminLoanSettings(){
+ const weeklyRate=Number(document.getElementById("cfgRate").value),minAmount=Number(document.getElementById("cfgMin").value),maxAmount=Number(document.getElementById("cfgMax").value),minWeeks=Number(document.getElementById("cfgMinWeeks").value),maxWeeks=Number(document.getElementById("cfgMaxWeeks").value);
+ if(!Number.isFinite(weeklyRate)||weeklyRate<0||minAmount<=0||maxAmount<minAmount||minWeeks<1||maxWeeks<minWeeks||maxWeeks>52){toast("Check the settings: amounts and week ranges are invalid");return;}
+ saveLoanSettings({weeklyRate,minAmount,maxAmount,minWeeks,maxWeeks});adminAudit("Loan settings updated",JSON.stringify(getLoanSettings()));toast("Loan settings saved");renderAdminSettings();
+}
+
 function renderAdminSettings(){
 
   const admin=getAdmin();
@@ -6844,25 +6705,16 @@ function renderAdminSettings(){
 
       <div style="padding:16px">
 
-        <div class="loan-line">
-          <span>Weekly Interest</span>
-          <strong>5%</strong>
+        ${(()=>{const c=getLoanSettings();return `
+        <div class="form-grid">
+          <div class="field"><label>Weekly Interest Rate (%)</label><input class="input" id="cfgRate" type="number" min="0" step="0.1" value="${c.weeklyRate}"></div>
+          <div class="field"><label>Minimum Loan (KES)</label><input class="input" id="cfgMin" type="number" min="1" value="${c.minAmount}"></div>
+          <div class="field"><label>Maximum Loan (KES)</label><input class="input" id="cfgMax" type="number" min="1" value="${c.maxAmount}"></div>
+          <div class="field"><label>Minimum Repayment Weeks</label><input class="input" id="cfgMinWeeks" type="number" min="1" max="52" value="${c.minWeeks}"></div>
+          <div class="field"><label>Maximum Repayment Weeks</label><input class="input" id="cfgMaxWeeks" type="number" min="1" max="52" value="${c.maxWeeks}"></div>
         </div>
-
-        <div class="loan-line">
-          <span>Minimum Loan</span>
-          <strong>KES 1,000</strong>
-        </div>
-
-        <div class="loan-line">
-          <span>Maximum Loan</span>
-          <strong>KES 50,000</strong>
-        </div>
-
-        <div class="loan-line">
-          <span>Maximum Duration</span>
-          <strong>12 Weeks</strong>
-        </div>
+        <button class="primary" onclick="saveAdminLoanSettings()">Save Loan Settings</button>
+        `;})()}
 
       </div>
 
