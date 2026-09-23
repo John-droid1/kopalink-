@@ -5296,109 +5296,341 @@ function adminClientDisplay(c){
     loanAmount:clientField(c,["loan_amount","total_loan","amount"],"0"),
     created:clientField(c,["created_at","createdAt"],"-")
   };
+async function loadAdminClients() {
+  const supabase = window.supabaseClient;
+
+  if (!supabase) {
+    console.error("KopaLink: Supabase client not initialized.");
+    return [];
+  }
+
+  try {
+    const {
+      data: { user },
+      error: userError
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      console.error(
+        "KopaLink admin session error:",
+        userError?.message
+      );
+      return [];
+    }
+
+    const {
+      data: clients,
+      error
+    } = await supabase
+      .from("profiles")
+      .select(`
+        id,
+        full_name,
+        username,
+        phone,
+        role,
+        active
+      `)
+      .eq("role", "client")
+      .order("full_name", {
+        ascending: true
+      });
+
+    if (error) {
+      console.error(
+        "KopaLink could not load clients:",
+        error
+      );
+
+      const list =
+        document.getElementById("adminClientList") ||
+        document.getElementById("clientList") ||
+        document.getElementById("clientsList");
+
+      if (list) {
+        list.innerHTML = `
+          <div style="
+            padding:20px;
+            text-align:center;
+            color:#e53935;
+          ">
+            Could not load clients.
+          </div>
+        `;
+      }
+
+      return [];
+    }
+
+    const rows = Array.isArray(clients)
+      ? clients
+      : [];
+
+    // Keep clients available to the rest of KopaLink
+    window.kopaLinkAdminClients = rows;
+
+    // Update common client counters if they exist
+    [
+      "adminClientCount",
+      "clientCount",
+      "totalClients"
+    ].forEach(id => {
+      const el = document.getElementById(id);
+
+      if (el) {
+        el.textContent = rows.length;
+      }
+    });
+
+    const list =
+      document.getElementById("adminClientList") ||
+      document.getElementById("clientList") ||
+      document.getElementById("clientsList");
+
+    if (!list) {
+      console.warn(
+        "KopaLink admin client list element was not found."
+      );
+      return rows;
+    }
+
+    if (!rows.length) {
+      list.innerHTML = `
+        <div style="
+          padding:30px 20px;
+          text-align:center;
+          color:#75817c;
+        ">
+          <div style="
+            font-size:36px;
+            margin-bottom:10px;
+          ">👥</div>
+
+          <strong>No clients found</strong>
+
+          <div style="
+            margin-top:6px;
+            font-size:13px;
+          ">
+            Registered clients will appear here.
+          </div>
+        </div>
+      `;
+
+      return rows;
+    }
+
+    list.innerHTML = rows.map(client => {
+
+      const name =
+        client.full_name ||
+        client.username ||
+        "Unnamed Client";
+
+      const username =
+        client.username ||
+        "No username";
+
+      const phone =
+        client.phone ||
+        "No phone";
+
+      const active =
+        client.active !== false;
+
+      const initial =
+        String(name)
+          .trim()
+          .charAt(0)
+          .toUpperCase() || "C";
+
+      return `
+        <div
+          class="admin-client-card"
+          data-client-id="${escapeAdminText(client.id)}"
+          onclick="openAdminClient('${escapeAdminText(client.id)}')"
+          style="
+            background:#fff;
+            border:1px solid #e5ebe8;
+            border-radius:16px;
+            padding:15px;
+            margin-bottom:10px;
+            cursor:pointer;
+            box-shadow:0 3px 10px rgba(0,0,0,.04);
+          "
+        >
+
+          <div style="
+            display:flex;
+            align-items:center;
+            gap:12px;
+          ">
+
+            <div style="
+              width:45px;
+              height:45px;
+              border-radius:50%;
+              background:#eef8f4;
+              color:#087f52;
+              display:flex;
+              align-items:center;
+              justify-content:center;
+              font-weight:700;
+              font-size:18px;
+              flex-shrink:0;
+            ">
+              ${initial}
+            </div>
+
+            <div style="
+              flex:1;
+              min-width:0;
+            ">
+
+              <div style="
+                font-weight:700;
+                color:#17201c;
+                margin-bottom:4px;
+                white-space:nowrap;
+                overflow:hidden;
+                text-overflow:ellipsis;
+              ">
+                ${escapeAdminText(name)}
+              </div>
+
+              <div style="
+                color:#75817c;
+                font-size:13px;
+                margin-bottom:3px;
+              ">
+                @${escapeAdminText(username)}
+              </div>
+
+              <div style="
+                color:#75817c;
+                font-size:12px;
+              ">
+                ${escapeAdminText(phone)}
+              </div>
+
+            </div>
+
+            <div style="
+              font-size:11px;
+              font-weight:700;
+              padding:6px 9px;
+              border-radius:20px;
+              white-space:nowrap;
+              color:${active ? "#087f52" : "#e53935"};
+              background:${active ? "#eef8f4" : "#fff0f0"};
+            ">
+              ${active ? "Active" : "Inactive"}
+            </div>
+
+          </div>
+
+        </div>
+      `;
+    }).join("");
+
+    return rows;
+
+  } catch (error) {
+    console.error(
+      "KopaLink loadAdminClients error:",
+      error
+    );
+
+    return [];
+  }
 }
 
-function updateAdminClientStats(clients){
-  let active=0, restricted=0, due=0;
-  clients.forEach(c=>{
-    const x=adminClientDisplay(c);
-    if(x.active===false || /restricted|inactive|disabled/i.test(String(x.status))) restricted++; else active++;
-    if(/due|arrear|overdue/i.test(String(x.status))) due++;
-  });
-  document.getElementById("acTotal")&&(document.getElementById("acTotal").textContent=clients.length);
-  document.getElementById("acActive")&&(document.getElementById("acActive").textContent=active);
-  document.getElementById("acDue")&&(document.getElementById("acDue").textContent=due);
-  document.getElementById("acRestricted")&&(document.getElementById("acRestricted").textContent=restricted);
-}
 
-function drawAdminClients(clients){
-  const box=document.getElementById("adminClientsTable");
-  if(!box)return;
-  if(!clients.length){box.innerHTML=`<div style="padding:25px;text-align:center;color:var(--muted)">No clients found.</div>`;return;}
+// ============================================================
+// KOPALINK ADMIN - OPEN CLIENT
+// ============================================================
 
-  box.innerHTML=`<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Client</th><th>Username</th><th>Phone</th><th>Status</th><th>Balance</th><th>Actions</th></tr></thead><tbody>${clients.map(c=>{
-    const x=adminClientDisplay(c);
-    const restricted=x.active===false || /restricted|inactive|disabled/i.test(String(x.status));
-    return `<tr>
-      <td><strong>${escapeHTML(x.name)}</strong><div style="font-size:10px;color:var(--muted)">${escapeHTML(x.id)}</div></td>
-      <td>${escapeHTML(x.username)}</td>
-      <td>${escapeHTML(x.phone)}</td>
-      <td><span class="status ${restricted?"rejected":"approved"}">${restricted?"Restricted":escapeHTML(x.status)}</span></td>
-      <td>${escapeHTML(String(x.balance))}</td>
-      <td><div class="admin-actions">
-        <button class="small-btn" style="background:var(--light);color:var(--green)" onclick="adminViewClient('${escapeHTML(String(x.id))}')">View</button>
-        <button class="small-btn danger" onclick="openAdminDeleteClient('${escapeHTML(String(x.id))}')">Delete</button>
-      </div></td>
-    </tr>`;
-  }).join("")}</tbody></table></div>`;
-}
+async function openAdminClient(clientId) {
 
-function filterAdminClients(){
-  const q=(document.getElementById("adminClientSearch")?.value||"").toLowerCase().trim();
-  if(!q){drawAdminClients(adminClientsCache);return;}
-  drawAdminClients(adminClientsCache.filter(c=>{
-    const x=adminClientDisplay(c);
-    return [x.name,x.username,x.phone,x.nationalId,x.id].some(v=>String(v).toLowerCase().includes(q));
-  }));
-}
+  if (!clientId) return;
 
-function adminViewClient(id){
-  const raw=adminClientsCache.find(c=>String(c.id)===String(id));
-  if(!raw)return;
-  const x=adminClientDisplay(raw);
-  const body=document.getElementById("adminClientDetailsBody");
-  body.innerHTML=`
-    <div style="text-align:center;margin-bottom:14px"><div class="avatar" style="width:70px;height:70px;margin:auto;font-size:25px">${escapeHTML((x.name||"C").charAt(0).toUpperCase())}</div><h3 style="margin-top:8px">${escapeHTML(x.name)}</h3></div>
-    <div class="loan-line"><span>Username</span><strong>${escapeHTML(x.username)}</strong></div>
-    <div class="loan-line"><span>Phone</span><strong>${escapeHTML(x.phone)}</strong></div>
-    <div class="loan-line"><span>National ID</span><strong>${escapeHTML(x.nationalId)}</strong></div>
-    <div class="loan-line"><span>Account status</span><strong>${escapeHTML(String(x.status))}</strong></div>
-    <div class="loan-line"><span>Loan amount</span><strong>${escapeHTML(String(x.loanAmount))}</strong></div>
-    <div class="loan-line"><span>Outstanding balance</span><strong>${escapeHTML(String(x.balance))}</strong></div>
-    <div class="loan-line"><span>Officer</span><strong>${escapeHTML(x.officer)}</strong></div>
-    <div class="loan-line"><span>Created</span><strong>${escapeHTML(String(x.created))}</strong></div>
-    <button class="primary" style="margin-top:15px" onclick="closeAdminClientDetails();openAdminDeleteClient('${escapeHTML(String(x.id))}')">Delete Client Permanently</button>`;
-  document.getElementById("adminClientDetailsModal").classList.add("show");
-}
+  const clients =
+    window.kopaLinkAdminClients || [];
 
-function closeAdminClientDetails(){document.getElementById("adminClientDetailsModal")?.classList.remove("show");}
+  let client =
+    clients.find(
+      item => String(item.id) === String(clientId)
+    );
 
-function openAdminDeleteClient(id){
-  const raw=adminClientsCache.find(c=>String(c.id)===String(id));
-  if(!raw)return;
-  selectedDeleteClient=raw;
-  document.getElementById("adminDeleteClientName").value=adminClientDisplay(raw).name;
-  document.getElementById("adminDeleteReason").value="";
-  document.getElementById("adminDeleteClientModal").classList.add("show");
-}
+  if (!client) {
 
-function closeAdminDeleteClient(){
-  document.getElementById("adminDeleteClientModal")?.classList.remove("show");
-  selectedDeleteClient=null;
-}
+    const supabase =
+      window.supabaseClient;
 
-async function confirmAdminDeleteClient(){
-  if(!selectedDeleteClient)return;
-  const reason=document.getElementById("adminDeleteReason").value.trim();
-  if(!reason){toast("Enter a reason for deletion");return;}
-  if(!confirm("Delete this client and all associated records permanently?"))return;
-  if(!confirm("FINAL CONFIRMATION: This cannot be undone. Continue?"))return;
+    if (!supabase) return;
 
-  const btn=document.getElementById("adminDeleteConfirmBtn");
-  btn.disabled=true; btn.textContent="Deleting...";
+    const {
+      data,
+      error
+    } = await supabase
+      .from("profiles")
+      .select(`
+        id,
+        full_name,
+        username,
+        phone,
+        role,
+        active
+      `)
+      .eq("id", clientId)
+      .eq("role", "client")
+      .maybeSingle();
 
-  try{
-    const {data:sessionData}=await kopaAdminDB.auth.getSession();
-    if(!sessionData?.session){
-      toast("Admin Supabase session not found. Log in with the Supabase admin account.");
+    if (error) {
+      console.error(
+        "KopaLink client lookup error:",
+        error
+      );
       return;
     }
-    const {data,error}=await kopaAdminDB.functions.invoke("admin-delete-client",{body:{client_id:selectedDeleteClient.id,reason}});
-    if(error)throw error;
-    if(data?.error)throw new Error(data.error);
-    toast("Client deleted permanently");
-    closeAdminDeleteClient();
-    await loadAdminClients();
+
+    client = data;
+  }
+
+  if (!client) {
+    if (typeof showToast === "function") {
+      showToast("Client not found.");
+    }
+    return;
+  }
+
+  // Use the existing KopaLink client-detail function/modal
+  // if your current application already has one.
+  if (typeof showClientDetails === "function") {
+    showClientDetails(client);
+    return;
+  }
+
+  console.log(
+    "KopaLink client:",
+    client
+  );
+}
+
+
+// ============================================================
+// SAFE TEXT
+// ============================================================
+
+function escapeAdminText(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+await loadAdminClients();
   }catch(e){
     toast("Delete failed: "+(e.message||"Unknown error"));
   }finally{
