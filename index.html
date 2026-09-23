@@ -5261,17 +5261,98 @@ let selectedDeleteClient=null;
 async function loadAdminClients(){
   const box=document.getElementById("adminClientsTable");
   if(!box)return;
-  box.innerHTML=`<div style="padding:25px;text-align:center;color:var(--muted)">Loading clients...</div>`;
 
-  const {data,error}=await kopaAdminDB.from("clients").select("*").order("created_at",{ascending:false});
-  if(error){
-    box.innerHTML=`<div style="padding:25px;color:var(--red)"><strong>Could not load clients.</strong><div style="font-size:12px;margin-top:6px">${escapeHTML(error.message||"Database error")}</div></div>`;
-    return;
+  box.innerHTML=`
+    <div style="padding:25px;text-align:center;color:var(--muted)">
+      Loading clients...
+    </div>
+  `;
+
+  try{
+    /*
+      Client accounts created by the create-client Edge Function are stored
+      in Supabase Auth + profiles. The old code queried a separate
+      "clients" table, so newly registered clients could not appear here.
+
+      Use the secure get-admin-clients Edge Function instead. It verifies
+      the current administrator session server-side and reads profiles
+      with the service-role key.
+    */
+    const {data:sessionData,error:sessionError}=await kopaAdminDB.auth.getSession();
+
+    if(sessionError){
+      throw new Error(
+        "Could not read the administrator Supabase session: "+
+        sessionError.message
+      );
+    }
+
+    if(!sessionData?.session?.access_token){
+      throw new Error(
+        "Administrator Supabase session not found. Log out and sign in again."
+      );
+    }
+
+    const {data,error}=await kopaAdminDB.functions.invoke(
+      "get-admin-clients",
+      {body:{}}
+    );
+
+    if(error){
+      throw new Error(
+        error.message ||
+        "The get-admin-clients function could not be reached."
+      );
+    }
+
+    if(!data || data.success!==true){
+      throw new Error(
+        data?.error ||
+        "The server could not load the client directory."
+      );
+    }
+
+    adminClientsCache=
+      Array.isArray(data.clients)
+        ? data.clients
+        : [];
+
+    updateAdminClientStats(adminClientsCache);
+    drawAdminClients(adminClientsCache);
+
+  }catch(error){
+
+    console.error("KopaLink admin client loading failed:",error);
+
+    box.innerHTML=`
+      <div style="
+        padding:25px;
+        color:var(--red);
+        background:#fff0ef;
+        border-radius:12px;
+        margin:12px;
+      ">
+        <strong>Could not load clients.</strong>
+        <div style="
+          font-size:12px;
+          margin-top:7px;
+          line-height:1.5;
+        ">
+          ${escapeHTML(error?.message||"Unknown error")}
+        </div>
+        <button
+          class="small-btn"
+          style="
+            margin-top:12px;
+            background:var(--light);
+            color:var(--green);
+          "
+          onclick="loadAdminClients()">
+          Try Again
+        </button>
+      </div>
+    `;
   }
-
-  adminClientsCache=Array.isArray(data)?data:[];
-  updateAdminClientStats(adminClientsCache);
-  drawAdminClients(adminClientsCache);
 }
 
 function clientField(c, names, fallback=""){
@@ -5296,341 +5377,109 @@ function adminClientDisplay(c){
     loanAmount:clientField(c,["loan_amount","total_loan","amount"],"0"),
     created:clientField(c,["created_at","createdAt"],"-")
   };
-async function loadAdminClients() {
-  const supabase = window.supabaseClient;
-
-  if (!supabase) {
-    console.error("KopaLink: Supabase client not initialized.");
-    return [];
-  }
-
-  try {
-    const {
-      data: { user },
-      error: userError
-    } = await supabase.auth.getUser();
-
-    if (userError || !user) {
-      console.error(
-        "KopaLink admin session error:",
-        userError?.message
-      );
-      return [];
-    }
-
-    const {
-      data: clients,
-      error
-    } = await supabase
-      .from("profiles")
-      .select(`
-        id,
-        full_name,
-        username,
-        phone,
-        role,
-        active
-      `)
-      .eq("role", "client")
-      .order("full_name", {
-        ascending: true
-      });
-
-    if (error) {
-      console.error(
-        "KopaLink could not load clients:",
-        error
-      );
-
-      const list =
-        document.getElementById("adminClientList") ||
-        document.getElementById("clientList") ||
-        document.getElementById("clientsList");
-
-      if (list) {
-        list.innerHTML = `
-          <div style="
-            padding:20px;
-            text-align:center;
-            color:#e53935;
-          ">
-            Could not load clients.
-          </div>
-        `;
-      }
-
-      return [];
-    }
-
-    const rows = Array.isArray(clients)
-      ? clients
-      : [];
-
-    // Keep clients available to the rest of KopaLink
-    window.kopaLinkAdminClients = rows;
-
-    // Update common client counters if they exist
-    [
-      "adminClientCount",
-      "clientCount",
-      "totalClients"
-    ].forEach(id => {
-      const el = document.getElementById(id);
-
-      if (el) {
-        el.textContent = rows.length;
-      }
-    });
-
-    const list =
-      document.getElementById("adminClientList") ||
-      document.getElementById("clientList") ||
-      document.getElementById("clientsList");
-
-    if (!list) {
-      console.warn(
-        "KopaLink admin client list element was not found."
-      );
-      return rows;
-    }
-
-    if (!rows.length) {
-      list.innerHTML = `
-        <div style="
-          padding:30px 20px;
-          text-align:center;
-          color:#75817c;
-        ">
-          <div style="
-            font-size:36px;
-            margin-bottom:10px;
-          ">👥</div>
-
-          <strong>No clients found</strong>
-
-          <div style="
-            margin-top:6px;
-            font-size:13px;
-          ">
-            Registered clients will appear here.
-          </div>
-        </div>
-      `;
-
-      return rows;
-    }
-
-    list.innerHTML = rows.map(client => {
-
-      const name =
-        client.full_name ||
-        client.username ||
-        "Unnamed Client";
-
-      const username =
-        client.username ||
-        "No username";
-
-      const phone =
-        client.phone ||
-        "No phone";
-
-      const active =
-        client.active !== false;
-
-      const initial =
-        String(name)
-          .trim()
-          .charAt(0)
-          .toUpperCase() || "C";
-
-      return `
-        <div
-          class="admin-client-card"
-          data-client-id="${escapeAdminText(client.id)}"
-          onclick="openAdminClient('${escapeAdminText(client.id)}')"
-          style="
-            background:#fff;
-            border:1px solid #e5ebe8;
-            border-radius:16px;
-            padding:15px;
-            margin-bottom:10px;
-            cursor:pointer;
-            box-shadow:0 3px 10px rgba(0,0,0,.04);
-          "
-        >
-
-          <div style="
-            display:flex;
-            align-items:center;
-            gap:12px;
-          ">
-
-            <div style="
-              width:45px;
-              height:45px;
-              border-radius:50%;
-              background:#eef8f4;
-              color:#087f52;
-              display:flex;
-              align-items:center;
-              justify-content:center;
-              font-weight:700;
-              font-size:18px;
-              flex-shrink:0;
-            ">
-              ${initial}
-            </div>
-
-            <div style="
-              flex:1;
-              min-width:0;
-            ">
-
-              <div style="
-                font-weight:700;
-                color:#17201c;
-                margin-bottom:4px;
-                white-space:nowrap;
-                overflow:hidden;
-                text-overflow:ellipsis;
-              ">
-                ${escapeAdminText(name)}
-              </div>
-
-              <div style="
-                color:#75817c;
-                font-size:13px;
-                margin-bottom:3px;
-              ">
-                @${escapeAdminText(username)}
-              </div>
-
-              <div style="
-                color:#75817c;
-                font-size:12px;
-              ">
-                ${escapeAdminText(phone)}
-              </div>
-
-            </div>
-
-            <div style="
-              font-size:11px;
-              font-weight:700;
-              padding:6px 9px;
-              border-radius:20px;
-              white-space:nowrap;
-              color:${active ? "#087f52" : "#e53935"};
-              background:${active ? "#eef8f4" : "#fff0f0"};
-            ">
-              ${active ? "Active" : "Inactive"}
-            </div>
-
-          </div>
-
-        </div>
-      `;
-    }).join("");
-
-    return rows;
-
-  } catch (error) {
-    console.error(
-      "KopaLink loadAdminClients error:",
-      error
-    );
-
-    return [];
-  }
 }
 
+function updateAdminClientStats(clients){
+  let active=0, restricted=0, due=0;
+  clients.forEach(c=>{
+    const x=adminClientDisplay(c);
+    if(x.active===false || /restricted|inactive|disabled/i.test(String(x.status))) restricted++; else active++;
+    if(/due|arrear|overdue/i.test(String(x.status))) due++;
+  });
+  document.getElementById("acTotal")&&(document.getElementById("acTotal").textContent=clients.length);
+  document.getElementById("acActive")&&(document.getElementById("acActive").textContent=active);
+  document.getElementById("acDue")&&(document.getElementById("acDue").textContent=due);
+  document.getElementById("acRestricted")&&(document.getElementById("acRestricted").textContent=restricted);
+}
 
-// ============================================================
-// KOPALINK ADMIN - OPEN CLIENT
-// ============================================================
+function drawAdminClients(clients){
+  const box=document.getElementById("adminClientsTable");
+  if(!box)return;
+  if(!clients.length){box.innerHTML=`<div style="padding:25px;text-align:center;color:var(--muted)">No clients found.</div>`;return;}
 
-async function openAdminClient(clientId) {
+  box.innerHTML=`<div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Client</th><th>Username</th><th>Phone</th><th>Status</th><th>Balance</th><th>Actions</th></tr></thead><tbody>${clients.map(c=>{
+    const x=adminClientDisplay(c);
+    const restricted=x.active===false || /restricted|inactive|disabled/i.test(String(x.status));
+    return `<tr>
+      <td><strong>${escapeHTML(x.name)}</strong><div style="font-size:10px;color:var(--muted)">${escapeHTML(x.id)}</div></td>
+      <td>${escapeHTML(x.username)}</td>
+      <td>${escapeHTML(x.phone)}</td>
+      <td><span class="status ${restricted?"rejected":"approved"}">${restricted?"Restricted":escapeHTML(x.status)}</span></td>
+      <td>${escapeHTML(String(x.balance))}</td>
+      <td><div class="admin-actions">
+        <button class="small-btn" style="background:var(--light);color:var(--green)" onclick="adminViewClient('${escapeHTML(String(x.id))}')">View</button>
+        <button class="small-btn danger" onclick="openAdminDeleteClient('${escapeHTML(String(x.id))}')">Delete</button>
+      </div></td>
+    </tr>`;
+  }).join("")}</tbody></table></div>`;
+}
 
-  if (!clientId) return;
+function filterAdminClients(){
+  const q=(document.getElementById("adminClientSearch")?.value||"").toLowerCase().trim();
+  if(!q){drawAdminClients(adminClientsCache);return;}
+  drawAdminClients(adminClientsCache.filter(c=>{
+    const x=adminClientDisplay(c);
+    return [x.name,x.username,x.phone,x.nationalId,x.id].some(v=>String(v).toLowerCase().includes(q));
+  }));
+}
 
-  const clients =
-    window.kopaLinkAdminClients || [];
+function adminViewClient(id){
+  const raw=adminClientsCache.find(c=>String(c.id)===String(id));
+  if(!raw)return;
+  const x=adminClientDisplay(raw);
+  const body=document.getElementById("adminClientDetailsBody");
+  body.innerHTML=`
+    <div style="text-align:center;margin-bottom:14px"><div class="avatar" style="width:70px;height:70px;margin:auto;font-size:25px">${escapeHTML((x.name||"C").charAt(0).toUpperCase())}</div><h3 style="margin-top:8px">${escapeHTML(x.name)}</h3></div>
+    <div class="loan-line"><span>Username</span><strong>${escapeHTML(x.username)}</strong></div>
+    <div class="loan-line"><span>Phone</span><strong>${escapeHTML(x.phone)}</strong></div>
+    <div class="loan-line"><span>National ID</span><strong>${escapeHTML(x.nationalId)}</strong></div>
+    <div class="loan-line"><span>Account status</span><strong>${escapeHTML(String(x.status))}</strong></div>
+    <div class="loan-line"><span>Loan amount</span><strong>${escapeHTML(String(x.loanAmount))}</strong></div>
+    <div class="loan-line"><span>Outstanding balance</span><strong>${escapeHTML(String(x.balance))}</strong></div>
+    <div class="loan-line"><span>Officer</span><strong>${escapeHTML(x.officer)}</strong></div>
+    <div class="loan-line"><span>Created</span><strong>${escapeHTML(String(x.created))}</strong></div>
+    <button class="primary" style="margin-top:15px" onclick="closeAdminClientDetails();openAdminDeleteClient('${escapeHTML(String(x.id))}')">Delete Client Permanently</button>`;
+  document.getElementById("adminClientDetailsModal").classList.add("show");
+}
 
-  let client =
-    clients.find(
-      item => String(item.id) === String(clientId)
-    );
+function closeAdminClientDetails(){document.getElementById("adminClientDetailsModal")?.classList.remove("show");}
 
-  if (!client) {
+function openAdminDeleteClient(id){
+  const raw=adminClientsCache.find(c=>String(c.id)===String(id));
+  if(!raw)return;
+  selectedDeleteClient=raw;
+  document.getElementById("adminDeleteClientName").value=adminClientDisplay(raw).name;
+  document.getElementById("adminDeleteReason").value="";
+  document.getElementById("adminDeleteClientModal").classList.add("show");
+}
 
-    const supabase =
-      window.supabaseClient;
+function closeAdminDeleteClient(){
+  document.getElementById("adminDeleteClientModal")?.classList.remove("show");
+  selectedDeleteClient=null;
+}
 
-    if (!supabase) return;
+async function confirmAdminDeleteClient(){
+  if(!selectedDeleteClient)return;
+  const reason=document.getElementById("adminDeleteReason").value.trim();
+  if(!reason){toast("Enter a reason for deletion");return;}
+  if(!confirm("Delete this client and all associated records permanently?"))return;
+  if(!confirm("FINAL CONFIRMATION: This cannot be undone. Continue?"))return;
 
-    const {
-      data,
-      error
-    } = await supabase
-      .from("profiles")
-      .select(`
-        id,
-        full_name,
-        username,
-        phone,
-        role,
-        active
-      `)
-      .eq("id", clientId)
-      .eq("role", "client")
-      .maybeSingle();
+  const btn=document.getElementById("adminDeleteConfirmBtn");
+  btn.disabled=true; btn.textContent="Deleting...";
 
-    if (error) {
-      console.error(
-        "KopaLink client lookup error:",
-        error
-      );
+  try{
+    const {data:sessionData}=await kopaAdminDB.auth.getSession();
+    if(!sessionData?.session){
+      toast("Admin Supabase session not found. Log in with the Supabase admin account.");
       return;
     }
-
-    client = data;
-  }
-
-  if (!client) {
-    if (typeof showToast === "function") {
-      showToast("Client not found.");
-    }
-    return;
-  }
-
-  // Use the existing KopaLink client-detail function/modal
-  // if your current application already has one.
-  if (typeof showClientDetails === "function") {
-    showClientDetails(client);
-    return;
-  }
-
-  console.log(
-    "KopaLink client:",
-    client
-  );
-}
-
-
-// ============================================================
-// SAFE TEXT
-// ============================================================
-
-function escapeAdminText(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-await loadAdminClients();
+    const {data,error}=await kopaAdminDB.functions.invoke("admin-delete-client",{body:{client_id:selectedDeleteClient.id,reason}});
+    if(error)throw error;
+    if(data?.error)throw new Error(data.error);
+    toast("Client deleted permanently");
+    closeAdminDeleteClient();
+    await loadAdminClients();
   }catch(e){
     toast("Delete failed: "+(e.message||"Unknown error"));
   }finally{
@@ -7399,24 +7248,40 @@ async function kopalinkAuthLogin(){
 
   const username=document.getElementById("loginUsername")?.value.trim();
   const password=document.getElementById("loginPassword")?.value||"";
-  if(!username||!password){toast("Enter username and password");return;}
+
+  if(!username||!password){
+    toast("Enter username and password");
+    return;
+  }
 
   const btn=document.querySelector(".auth-login-btn");
-  if(btn){btn.disabled=true;btn.dataset.oldText=btn.innerHTML;btn.innerHTML="Signing in...";}
+
+  if(btn){
+    btn.disabled=true;
+    btn.dataset.oldText=btn.innerHTML;
+    btn.innerHTML="Signing in...";
+  }
 
   try{
+
     /*
-      KopaLink uses Supabase Auth for clients, officers and admins.
-      Client usernames are converted to the same internal Auth email
-      format used by the create-client Edge Function.
+      IMPORTANT:
+      create-client creates Supabase Auth users with:
+        username@auth.kopalink.local
+
+      This login function uses the exact same format, so clients created
+      from the Officer dashboard can sign in with Username + Password.
     */
     const admin=getAdmin();
+
     const isLocalAdmin=
-      username.toLowerCase()===String(admin.username||"").trim().toLowerCase() &&
+      username.toLowerCase()===
+      String(admin.username||"").trim().toLowerCase() &&
       password===String(admin.password||"") &&
       admin.active!==false;
 
     let email=authEmailForUsername(username);
+
     if(isLocalAdmin){
       const realAdminEmail=getSavedAdminAuthEmail();
       if(realAdminEmail)email=realAdminEmail;
@@ -7427,148 +7292,307 @@ async function kopalinkAuthLogin(){
       password
     });
 
-    if(error || !data?.user){
-      throw error || new Error("Invalid username or password");
+    if(error||!data?.user){
+      throw error||new Error("Invalid username or password");
     }
 
     const authUser=data.user;
     const metadata=authUser.user_metadata||{};
-    const metadataRole=String(metadata.role||"").trim().toLowerCase();
+    const metadataRole=String(
+      metadata.role||""
+    ).trim().toLowerCase();
 
     /*
-      First try the KopaLink profile. If RLS prevents the browser from
-      reading it, a client can still log in because the create-client
-      Edge Function stores the client role in Supabase Auth metadata.
+      The browser may be blocked by profiles RLS.
+      Therefore profile loading is optional when Auth metadata already
+      identifies the user as a client/officer/admin.
     */
     let profile=null;
-    let profileError=null;
 
     try{
+
       const result=await kopaAdminDB
         .from("profiles")
-        .select("id,full_name,username,phone,role,active")
+        .select(
+          "id,full_name,username,phone,role,active"
+        )
         .eq("id",authUser.id)
         .maybeSingle();
-      profile=result.data||null;
-      profileError=result.error||null;
-    }catch(e){
-      profileError=e;
+
+      if(!result.error){
+        profile=result.data||null;
+      }else{
+        console.warn(
+          "KopaLink profile lookup was not available:",
+          result.error.message
+        );
+      }
+
+    }catch(profileLookupError){
+
+      console.warn(
+        "KopaLink profile lookup failed:",
+        profileLookupError
+      );
     }
 
-    if(profileError && metadataRole!=="client"){
+    /*
+      Prefer the database profile, then Auth metadata.
+      Both create-client and create-officer store the role in metadata.
+    */
+    const role=String(
+      profile?.role||
+      metadataRole||
+      ""
+    )
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g,"_");
+
+    const fullName=
+      profile?.full_name||
+      metadata.full_name||
+      username;
+
+    const profileUsername=
+      profile?.username||
+      metadata.username||
+      username;
+
+    const phone=
+      profile?.phone||
+      metadata.phone||
+      "";
+
+    const active=
+      profile?.active!==false;
+
+    if(!role){
+
       await kopaAdminDB.auth.signOut();
-      throw new Error("Could not load KopaLink profile: "+profileError.message);
+
+      throw new Error(
+        "Your Supabase account was found, but no KopaLink role was found. Make sure the client was registered through KopaLink."
+      );
     }
 
-    /* CLIENT */
-    const role=String(profile?.role||metadataRole||"").trim().toLowerCase();
+    /* =========================
+       CLIENT
+    ========================= */
 
     if(role==="client"){
-      if(profile?.active===false){
+
+      if(!active){
         await kopaAdminDB.auth.signOut();
-        throw new Error("Your KopaLink account is inactive");
+        throw new Error(
+          "Your KopaLink account is inactive"
+        );
       }
 
       const clientProfile={
         id:authUser.id,
-        name:profile?.full_name||metadata.full_name||username,
-        username:profile?.username||metadata.username||username,
-        phone:profile?.phone||metadata.phone||"",
-        active:profile?.active!==false,
+        name:fullName,
+        username:profileUsername,
+        phone,
+        active:true,
         createdAt:todayISO(),
         loan:null
       };
 
       const users=getUsers();
+
       let client=
-        users.find(u=>String(u.id)===String(authUser.id)) ||
-        users.find(u=>String(u.username||"").toLowerCase()===String(clientProfile.username).toLowerCase());
+        users.find(
+          u=>String(u.id)===
+            String(authUser.id)
+        )||
+        users.find(
+          u=>String(u.username||"").toLowerCase()===
+            String(clientProfile.username).toLowerCase()
+        );
 
       if(!client){
+
         client=clientProfile;
         users.push(client);
+
       }else{
+
         client.id=authUser.id;
         client.name=clientProfile.name;
         client.username=clientProfile.username;
-        client.phone=clientProfile.phone||client.phone||"";
-        client.active=clientProfile.active;
+        client.phone=
+          clientProfile.phone||
+          client.phone||
+          "";
+        client.active=true;
       }
 
       saveUsers(users);
+
       clearSession();
-      setSession({type:"client",id:authUser.id,user_id:authUser.id});
-      localStorage.setItem(CURRENT_USER_KEY,JSON.stringify(client));
+
+      setSession({
+        type:"client",
+        id:authUser.id,
+        user_id:authUser.id
+      });
+
+      localStorage.setItem(
+        CURRENT_USER_KEY,
+        JSON.stringify(client)
+      );
+
       showClientApp();
       return;
     }
 
-    /* ADMIN */
-    if(role==="admin"||role==="administrator"||role==="super admin"){
-      if(profile?.active===false){
+    /* =========================
+       ADMIN
+    ========================= */
+
+    if(
+      role==="admin"||
+      role==="administrator"||
+      role==="super_admin"||
+      role==="superadmin"||
+      role==="super_admin"
+    ){
+
+      if(!active){
         await kopaAdminDB.auth.signOut();
-        throw new Error("This KopaLink account is inactive");
+        throw new Error(
+          "This KopaLink account is inactive"
+        );
       }
+
       clearSession();
-      if(isLocalAdmin)saveAdminAuthEmail(email);
-      localStorage.setItem(ADMIN_SESSION_KEY,"true");
-      localStorage.setItem("KOPALINK_AUTH_USER",JSON.stringify(profile||{
-        id:authUser.id,
-        username:metadata.username||username,
-        full_name:metadata.full_name||username,
-        role
-      }));
+
+      if(isLocalAdmin){
+        saveAdminAuthEmail(email);
+      }
+
+      localStorage.setItem(
+        ADMIN_SESSION_KEY,
+        "true"
+      );
+
+      localStorage.setItem(
+        "KOPALINK_AUTH_USER",
+        JSON.stringify(
+          profile||{
+            id:authUser.id,
+            username:profileUsername,
+            full_name:fullName,
+            phone,
+            role:"admin",
+            active:true
+          }
+        )
+      );
+
       showAdminApp();
       return;
     }
 
-    /* OFFICER */
-    if(role==="officer"||role==="relationship officer"){
-      if(profile?.active===false){
+    /* =========================
+       OFFICER
+    ========================= */
+
+    if(
+      role==="officer"||
+      role==="relationship_officer"||
+      role==="relationship officer"
+    ){
+
+      if(!active){
         await kopaAdminDB.auth.signOut();
-        throw new Error("Officer account is inactive");
+        throw new Error(
+          "Officer account is inactive"
+        );
       }
+
       const officers=getOfficers();
+
       let officer=
-        officers.find(o=>String(o.id)===String(authUser.id)) ||
-        officers.find(o=>String(o.username||"").toLowerCase()===String(profile?.username||metadata.username||username).toLowerCase());
+        officers.find(
+          o=>String(o.id)===
+            String(authUser.id)
+        )||
+        officers.find(
+          o=>String(o.username||"").toLowerCase()===
+            String(profileUsername).toLowerCase()
+        );
 
       if(!officer){
+
         officer={
           id:authUser.id,
-          name:profile?.full_name||metadata.full_name||username,
-          username:profile?.username||metadata.username||username,
-          phone:profile?.phone||metadata.phone||"",
-          active:profile?.active!==false,
+          name:fullName,
+          username:profileUsername,
+          phone,
+          active:true,
           createdAt:todayISO()
         };
+
         officers.push(officer);
+
       }else{
+
         officer.id=authUser.id;
-        officer.name=profile?.full_name||officer.name;
-        officer.username=profile?.username||officer.username;
-        officer.phone=profile?.phone||officer.phone||"";
-        officer.active=profile?.active!==false;
+        officer.name=fullName;
+        officer.username=profileUsername;
+        officer.phone=phone||officer.phone||"";
+        officer.active=true;
       }
 
       saveOfficers(officers);
+
       clearSession();
-      setSession({type:"officer",id:authUser.id,user_id:authUser.id});
-      localStorage.setItem(CURRENT_OFFICER_KEY,JSON.stringify(officer));
+
+      setSession({
+        type:"officer",
+        id:authUser.id,
+        user_id:authUser.id
+      });
+
+      localStorage.setItem(
+        CURRENT_OFFICER_KEY,
+        JSON.stringify(officer)
+      );
+
       showOfficerApp();
       return;
     }
 
     await kopaAdminDB.auth.signOut();
-    throw new Error("This account has no valid KopaLink role");
+
+    throw new Error(
+      "This Supabase account has no valid KopaLink role."
+    );
 
   }catch(e){
-    console.error("KopaLink Supabase login error:",e);
-    toast("Login failed: "+(e?.message||"Check username and password"));
+
+    console.error(
+      "KopaLink Supabase login error:",
+      e
+    );
+
+    toast(
+      "Login failed: "+
+      (e?.message||"Check username and password")
+    );
+
   }finally{
-    if(btn){btn.disabled=false;btn.innerHTML=btn.dataset.oldText||"Login";}
+
+    if(btn){
+      btn.disabled=false;
+      btn.innerHTML=
+        btn.dataset.oldText||"Login";
+    }
   }
 }
+
 
 async function connectKopaLinkAdminAuth(){
   const email=document.getElementById("adminAuthEmail")?.value.trim().toLowerCase();
@@ -7697,47 +7721,134 @@ window.login=kopalinkAuthLogin;
 
 // Restore an existing Supabase session after refresh.
 (async function restoreKopaLinkAuth(){
+
   try{
+
     const {data}=await kopaAdminDB.auth.getSession();
     const session=data?.session;
+
     if(!session)return;
 
-    const {data:profile}=await kopaAdminDB
-      .from("profiles")
-      .select("id,full_name,username,phone,role,active")
-      .eq("id",session.user.id)
-      .maybeSingle();
-
     const meta=session.user.user_metadata||{};
-    const p=profile||{
-      id:session.user.id,full_name:meta.full_name||"User",
-      username:meta.username||"",phone:meta.phone||"",
-      role:meta.role||"client",active:true
-    };
-    if(p.active===false)return;
 
-    const role=String(p.role||"client").toLowerCase();
-    if(role==="admin"||role==="administrator"||role==="super admin"){
-      localStorage.setItem(ADMIN_SESSION_KEY,"true");
-      localStorage.setItem("KOPALINK_AUTH_USER",JSON.stringify(p));
+    let profile=null;
+
+    try{
+
+      const result=await kopaAdminDB
+        .from("profiles")
+        .select(
+          "id,full_name,username,phone,role,active"
+        )
+        .eq("id",session.user.id)
+        .maybeSingle();
+
+      if(!result.error){
+        profile=result.data||null;
+      }
+
+    }catch(e){
+
+      console.warn(
+        "Supabase profile restore lookup failed:",
+        e
+      );
+    }
+
+    const p=profile||{
+      id:session.user.id,
+      full_name:meta.full_name||"User",
+      username:meta.username||"",
+      phone:meta.phone||"",
+      role:meta.role||"client",
+      active:true
+    };
+
+    if(p.active===false){
+      await kopaAdminDB.auth.signOut();
+      return;
+    }
+
+    const role=String(
+      p.role||"client"
+    )
+      .toLowerCase()
+      .replace(/\s+/g,"_");
+
+    if(
+      role==="admin"||
+      role==="administrator"||
+      role==="super_admin"||
+      role==="superadmin"
+    ){
+
+      localStorage.setItem(
+        ADMIN_SESSION_KEY,
+        "true"
+      );
+
+      localStorage.setItem(
+        "KOPALINK_AUTH_USER",
+        JSON.stringify(p)
+      );
+
       showAdminApp();
-    }else if(role==="officer"||role==="relationship officer"){
-      setSession({type:"officer",id:p.id,user_id:session.user.id});
-      localStorage.setItem(CURRENT_OFFICER_KEY,JSON.stringify({
-        id:p.id,name:p.full_name,username:p.username,phone:p.phone,active:p.active!==false
-      }));
+
+    }else if(
+      role==="officer"||
+      role==="relationship_officer"
+    ){
+
+      setSession({
+        type:"officer",
+        id:p.id,
+        user_id:session.user.id
+      });
+
+      localStorage.setItem(
+        CURRENT_OFFICER_KEY,
+        JSON.stringify({
+          id:p.id,
+          name:p.full_name,
+          username:p.username,
+          phone:p.phone,
+          active:p.active!==false
+        })
+      );
+
       showOfficerApp();
+
     }else{
-      setSession({type:"client",id:p.id,user_id:session.user.id});
-      localStorage.setItem(CURRENT_USER_KEY,JSON.stringify({
-        id:p.id,name:p.full_name,username:p.username,phone:p.phone,active:p.active!==false
-      }));
+
+      setSession({
+        type:"client",
+        id:p.id,
+        user_id:session.user.id
+      });
+
+      localStorage.setItem(
+        CURRENT_USER_KEY,
+        JSON.stringify({
+          id:p.id,
+          name:p.full_name,
+          username:p.username,
+          phone:p.phone,
+          active:p.active!==false
+        })
+      );
+
       showClientApp();
     }
+
   }catch(e){
-    console.warn("Supabase session restore failed",e);
+
+    console.warn(
+      "Supabase session restore failed",
+      e
+    );
   }
-})();
+
+})();;
 </script>
 </body>
 </html>
