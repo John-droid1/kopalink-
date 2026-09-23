@@ -4009,76 +4009,68 @@ function renderOfficerRegister(){
   `;
 }
 
-function registerClientByOfficer(){
+async function registerClientByOfficer(){
 
   const officer=currentOfficer();
+  if(!officer){toast("Officer session not found");return;}
 
   const name=document.getElementById("clientName").value.trim();
-  const username=document.getElementById("clientUsername").value.trim();
+  const username=document.getElementById("clientUsername").value.trim().toLowerCase();
   const nationalId=document.getElementById("clientNationalId").value.trim();
   const phone=document.getElementById("clientPhone").value.trim();
   const location=document.getElementById("clientLocation").value.trim();
   const password=document.getElementById("clientPassword").value;
+  const residence=document.querySelector('input[name="residence"]:checked')?.value||"Rental";
 
-  const residence=
-    document.querySelector(
-      'input[name="residence"]:checked'
-    )?.value||"Rental";
-
-  if(!name || !username || !nationalId || !phone || !location){
+  if(!name||!username||!nationalId||!phone||!location||!password){
     toast("Complete the client details");
     return;
   }
-
+  if(password.length<6){
+    toast("Client password must be at least 6 characters");
+    return;
+  }
   if(findClient(username)||findOfficer(username)){
     toast("Username already exists");
     return;
   }
 
-  const users=getUsers();
+  const btn=document.querySelector('#officerContent .primary');
+  if(btn){btn.disabled=true;btn.textContent="Creating...";}
 
-  const client={
-    id:"CL-"+Date.now(),
-    name,
-    username,
-    password:password||"1234",
-    phone,
-    nationalId,
-    location,
-    residence,
-    guarantorName:
-      document.getElementById("guarantorName").value.trim(),
-    guarantorPhone:
-      document.getElementById("guarantorPhone").value.trim(),
-    nextOfKinName:
-      document.getElementById("nextOfKinName").value.trim(),
-    nextOfKinPhone:
-      document.getElementById("nextOfKinPhone").value.trim(),
-    officerId:officer.id,
-    active:true,
-    createdAt:todayISO(),
-    loan:null
-  };
+  try{
+    const result=await kopalinkCreateClientAuth({
+      full_name:name,username,phone,password
+    });
 
-  users.push(client);
+    const client={
+      id:result.profile_id||result.client_id||result.user_id||("CL-"+Date.now()),
+      name,username,password,phone,nationalId,location,residence,
+      guarantorName:document.getElementById("guarantorName").value.trim(),
+      guarantorPhone:document.getElementById("guarantorPhone").value.trim(),
+      nextOfKinName:document.getElementById("nextOfKinName").value.trim(),
+      nextOfKinPhone:document.getElementById("nextOfKinPhone").value.trim(),
+      officerId:officer.id,active:true,createdAt:todayISO(),loan:null,
+      supabaseUserId:result.user_id||result.profile_id||null
+    };
 
-  saveUsers(users);
+    const users=getUsers();
+    users.push(client);
+    saveUsers(users);
 
-  sendNotification(
-    "client",
-    client.id,
-    "Welcome to KopaLink",
-    "Your KopaLink client account has been created by your relationship officer."
-  );
+    sendNotification("client",client.id,"Welcome to KopaLink","Your KopaLink client account has been created by your relationship officer.");
+    adminAudit("Client registered",name+" registered by "+officer.name);
 
-  adminAudit(
-    "Client registered",
-    name+" registered by "+officer.name
-  );
+    ["clientName","clientUsername","clientNationalId","clientPhone","clientLocation","clientPassword","guarantorName","guarantorPhone","nextOfKinName","nextOfKinPhone"].forEach(id=>{const el=document.getElementById(id);if(el)el.value="";});
 
-  toast("Client registered successfully");
-
-  officerPage("clients");
+    toast("Client Supabase account created successfully");
+    officerPage("clients");
+  }catch(e){
+    console.error("Client Supabase registration failed:",e);
+    toast("Client registration failed: "+(e?.message||"Unknown error"));
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent="Register Client";}
+  }
 }
 
 
@@ -7173,280 +7165,81 @@ function saveAdminAuthEmail(email){
 
 async function kopalinkAuthLogin(){
 
-  const username =
-    document.getElementById("loginUsername")?.value.trim();
+  const username=document.getElementById("loginUsername")?.value.trim();
+  const password=document.getElementById("loginPassword")?.value||"";
+  if(!username||!password){toast("Enter username and password");return;}
 
-  const password =
-    document.getElementById("loginPassword")?.value || "";
-
-  if(!username || !password){
-    toast("Enter username and password");
-    return;
-  }
-
-  const btn =
-    document.querySelector(".auth-login-btn");
-
-  if(btn){
-    btn.disabled = true;
-    btn.dataset.oldText = btn.innerHTML;
-    btn.innerHTML = "Signing in...";
-  }
+  const btn=document.querySelector(".auth-login-btn");
+  if(btn){btn.disabled=true;btn.dataset.oldText=btn.innerHTML;btn.innerHTML="Signing in...";}
 
   try{
+    const admin=getAdmin();
+    const isLocalAdmin=username.toLowerCase()===String(admin.username||"").toLowerCase() && password===String(admin.password||"") && admin.active!==false;
+    let email=authEmailForUsername(username);
+    if(isLocalAdmin){const realAdminEmail=getSavedAdminAuthEmail();if(realAdminEmail)email=realAdminEmail;}
 
-    const admin = getAdmin();
+    const {data,error}=await kopaAdminDB.auth.signInWithPassword({email,password});
+    if(error||!data?.user)throw error||new Error("Invalid username or password");
 
-    const isLocalAdmin =
-      username.toLowerCase() ===
-        String(admin.username || "").toLowerCase() &&
-      password ===
-        String(admin.password || "") &&
-      admin.active !== false;
+    const {data:profile,error:profileError}=await kopaAdminDB.from("profiles")
+      .select("id,full_name,username,phone,role,active").eq("id",data.user.id).maybeSingle();
 
-    let email =
-      authEmailForUsername(username);
+    if(profileError){await kopaAdminDB.auth.signOut();throw new Error("Could not load KopaLink profile: "+profileError.message);}
+    if(!profile){await kopaAdminDB.auth.signOut();throw new Error("KopaLink profile not found for this account");}
+    if(profile.active===false){await kopaAdminDB.auth.signOut();throw new Error("This KopaLink account is inactive");}
 
-    if(isLocalAdmin){
+    const role=String(profile.role||"").trim().toLowerCase();
 
-      const realAdminEmail =
-        getSavedAdminAuthEmail();
-
-      if(realAdminEmail){
-        email = realAdminEmail;
-      }
-    }
-
-    const {
-      data,
-      error
-    } =
-      await kopaAdminDB.auth.signInWithPassword({
-        email: email,
-        password: password
-      });
-
-    if(error || !data?.user){
-      throw error ||
-        new Error("Invalid username or password");
-    }
-
-    const {
-      data: profile,
-      error: profileError
-    } =
-      await kopaAdminDB
-        .from("profiles")
-        .select(
-          "id,full_name,username,phone,role,active"
-        )
-        .eq("id", data.user.id)
-        .maybeSingle();
-
-    if(profileError){
-      await kopaAdminDB.auth.signOut();
-      throw new Error(
-        "Could not load KopaLink profile: " +
-        profileError.message
-      );
-    }
-
-    if(!profile){
-      await kopaAdminDB.auth.signOut();
-      throw new Error(
-        "KopaLink profile not found for this account"
-      );
-    }
-
-    if(profile.active === false){
-      await kopaAdminDB.auth.signOut();
-      throw new Error(
-        "This KopaLink account is inactive"
-      );
-    }
-
-    const role =
-      String(profile.role || "")
-        .trim()
-        .toLowerCase();
-
-    if(
-      role === "admin" ||
-      role === "administrator" ||
-      role === "super admin"
-    ){
-
-      localStorage.setItem(
-        ADMIN_SESSION_KEY,
-        "true"
-      );
-
-      localStorage.setItem(
-        "KOPALINK_AUTH_USER",
-        JSON.stringify({
-          id: data.user.id,
-          full_name: profile.full_name,
-          username: profile.username,
-          phone: profile.phone,
-          role: role,
-          active: profile.active !== false
-        })
-      );
-
+    if(role==="admin"||role==="administrator"||role==="super admin"){
+      clearSession();
+      if(isLocalAdmin)saveAdminAuthEmail(email);
+      localStorage.setItem(ADMIN_SESSION_KEY,"true");
+      localStorage.setItem("KOPALINK_AUTH_USER",JSON.stringify(profile));
       showAdminApp();
       return;
     }
 
-    if(
-      role === "officer" ||
-      role === "relationship officer"
-    ){
-
-      const officers =
-        getOfficers();
-
-      let officer =
-        officers.find(
-          o =>
-            String(o.id) ===
-            String(profile.id)
-        );
-
+    if(role==="officer"||role==="relationship officer"){
+      const officers=getOfficers();
+      let officer=officers.find(o=>String(o.id)===String(profile.id)) || officers.find(o=>String(o.username||"").toLowerCase()===String(profile.username||"").toLowerCase());
       if(!officer){
-        officer =
-          officers.find(
-            o =>
-              String(o.username || "")
-                .toLowerCase() ===
-              String(profile.username || "")
-                .toLowerCase()
-          );
-      }
-
-      if(!officer){
-
-        officer = {
-          id: profile.id,
-          name:
-            profile.full_name ||
-            profile.username ||
-            "Officer",
-          username:
-            profile.username || "",
-          phone:
-            profile.phone || "",
-          active:
-            profile.active !== false,
-          createdAt:
-            todayISO()
-        };
-
+        officer={id:profile.id,name:profile.full_name||profile.username||"Officer",username:profile.username||"",phone:profile.phone||"",active:profile.active!==false,createdAt:todayISO()};
         officers.push(officer);
-        saveOfficers(officers);
-
       }else{
-
-        officer.id =
-          profile.id;
-
-        officer.name =
-          profile.full_name ||
-          officer.name;
-
-        officer.username =
-          profile.username ||
-          officer.username;
-
-        officer.phone =
-          profile.phone ||
-          officer.phone ||
-          "";
-
-        officer.active =
-          profile.active !== false;
-
-        saveOfficers(officers);
+        officer.id=profile.id; officer.name=profile.full_name||officer.name; officer.username=profile.username||officer.username; officer.phone=profile.phone||officer.phone||""; officer.active=profile.active!==false;
       }
-
+      saveOfficers(officers);
       clearSession();
-
-      setSession({
-        type: "officer",
-        id: profile.id,
-        user_id: data.user.id
-      });
-
-      localStorage.setItem(
-        CURRENT_OFFICER_KEY,
-        JSON.stringify({
-          id: profile.id,
-          name: profile.full_name,
-          username: profile.username,
-          phone: profile.phone,
-          active: profile.active !== false
-        })
-      );
-
+      setSession({type:"officer",id:profile.id,user_id:data.user.id});
+      localStorage.setItem(CURRENT_OFFICER_KEY,JSON.stringify(officer));
       showOfficerApp();
       return;
     }
 
-    if(role === "client"){
-
+    if(role==="client"){
+      const users=getUsers();
+      let client=users.find(u=>String(u.id)===String(profile.id)) || users.find(u=>String(u.username||"").toLowerCase()===String(profile.username||"").toLowerCase());
+      if(!client){
+        client={id:profile.id,name:profile.full_name||profile.username||"Client",username:profile.username||"",phone:profile.phone||"",active:profile.active!==false,createdAt:todayISO(),loan:null};
+        users.push(client);
+      }else{
+        client.id=profile.id; client.name=profile.full_name||client.name; client.username=profile.username||client.username; client.phone=profile.phone||client.phone||""; client.active=profile.active!==false;
+      }
+      saveUsers(users);
       clearSession();
-
-      setSession({
-        type: "client",
-        id: profile.id,
-        user_id: data.user.id
-      });
-
-      localStorage.setItem(
-        CURRENT_USER_KEY,
-        JSON.stringify({
-          id: profile.id,
-          name: profile.full_name,
-          username: profile.username,
-          phone: profile.phone,
-          active: profile.active !== false
-        })
-      );
-
+      setSession({type:"client",id:profile.id,user_id:data.user.id});
+      localStorage.setItem(CURRENT_USER_KEY,JSON.stringify(client));
       showClientApp();
       return;
     }
 
     await kopaAdminDB.auth.signOut();
-
-    throw new Error(
-      "This account has no valid KopaLink role"
-    );
-
+    throw new Error("This account has no valid KopaLink role");
   }catch(e){
-
-    console.error(
-      "KopaLink Supabase login error:",
-      e
-    );
-
-    toast(
-      "Login failed: " +
-      (
-        e?.message ||
-        "Check username and password"
-      )
-    );
-
+    console.error("KopaLink Supabase login error:",e);
+    toast("Login failed: "+(e?.message||"Check username and password"));
   }finally{
-
-    if(btn){
-
-      btn.disabled = false;
-
-      btn.innerHTML =
-        btn.dataset.oldText ||
-        "Login";
-    }
+    if(btn){btn.disabled=false;btn.innerHTML=btn.dataset.oldText||"Login";}
   }
 }
 
@@ -7552,6 +7345,23 @@ async function kopalinkCreateOfficerAuth(name,username,phone,password){
   }
 
   if(data?.error) throw new Error(data.error);
+  return data;
+}
+
+async function kopalinkCreateClientAuth(client){
+  const {data:sessionData,error:sessionError}=await kopaAdminDB.auth.getSession();
+  if(sessionError)throw new Error("Could not read the Supabase session: "+sessionError.message);
+  const session=sessionData?.session;
+  if(!session?.access_token)throw new Error("Your Officer Supabase session was not found. Please log in again.");
+
+  const response=await fetch(`${KOPALINK_SUPABASE_URL}/functions/v1/create-client`,{
+    method:"POST",
+    headers:{"Content-Type":"application/json","apikey":KOPALINK_SUPABASE_KEY,"Authorization":`Bearer ${session.access_token}`},
+    body:JSON.stringify(client)
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(data?.error||data?.message||`Create-client request failed with HTTP ${response.status}`);
+  if(data?.error)throw new Error(data.error);
   return data;
 }
 
