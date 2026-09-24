@@ -1910,8 +1910,26 @@ const NOTIFICATIONS_KEY="kopaLinkNotifications";
 const PAYMENTS_KEY="kopaLinkPayments";
 const LOAN_SETTINGS_KEY="kopaLinkLoanSettings";
 const DEFAULT_LOAN_SETTINGS={weeklyRate:5,minAmount:1000,maxAmount:50000,minWeeks:1,maxWeeks:12};
-function getLoanSettings(){return {...DEFAULT_LOAN_SETTINGS,...JSON.parse(localStorage.getItem(LOAN_SETTINGS_KEY)||"{}")};}
-function saveLoanSettings(settings){localStorage.setItem(LOAN_SETTINGS_KEY,JSON.stringify(settings));}
+function getLoanSettings(){
+  try {
+    const cached=JSON.parse(localStorage.getItem(LOAN_SETTINGS_KEY)||"{}");
+    return {...DEFAULT_LOAN_SETTINGS,...(cached&&typeof cached==="object"?cached:{})};
+  } catch(error) {
+    console.warn("Invalid cached loan settings; using defaults.",error);
+    return {...DEFAULT_LOAN_SETTINGS};
+  }
+}
+async function saveLoanSettings(settings){
+  localStorage.setItem(LOAN_SETTINGS_KEY,JSON.stringify(settings));
+  if(typeof kopaAdminDB==="undefined") return false;
+  const {data:userData,error:userError}=await kopaAdminDB.auth.getUser();
+  if(userError || !userData?.user) throw new Error("Please sign in before saving shared settings.");
+  const {error}=await kopaAdminDB.from("loan_settings").upsert({
+    id:"default", settings, updated_at:new Date().toISOString(), updated_by:userData.user.id
+  },{onConflict:"id"});
+  if(error) throw error;
+  return true;
+}
 
 
 
@@ -6644,10 +6662,11 @@ function renderAdminAudit(){
    ADMIN SETTINGS
 ============================================================ */
 
-function saveAdminLoanSettings(){
+async function saveAdminLoanSettings(){
  const weeklyRate=Number(document.getElementById("cfgRate").value),minAmount=Number(document.getElementById("cfgMin").value),maxAmount=Number(document.getElementById("cfgMax").value),minWeeks=Number(document.getElementById("cfgMinWeeks").value),maxWeeks=Number(document.getElementById("cfgMaxWeeks").value);
  if(!Number.isFinite(weeklyRate)||weeklyRate<0||minAmount<=0||maxAmount<minAmount||minWeeks<1||maxWeeks<minWeeks||maxWeeks>52){toast("Check the settings: amounts and week ranges are invalid");return;}
- saveLoanSettings({weeklyRate,minAmount,maxAmount,minWeeks,maxWeeks});adminAudit("Loan settings updated",JSON.stringify(getLoanSettings()));toast("Loan settings saved");renderAdminSettings();
+ try{await saveLoanSettings({weeklyRate,minAmount,maxAmount,minWeeks,maxWeeks});adminAudit("Loan settings updated",JSON.stringify(getLoanSettings()));toast("Loan settings saved and synced");renderAdminSettings();}
+ catch(error){console.error(error);toast("Could not sync settings: "+(error.message||"check connection and admin access"));}
 }
 
 function renderAdminSettings(){
@@ -7059,6 +7078,39 @@ function togglePassword(){
 const KOPALINK_SUPABASE_URL="https://jkcsjjhlukvvmgbowdcn.supabase.co";
 const KOPALINK_SUPABASE_KEY="sb_publishable_2tbFYqYHsbXDRuZfUuZQOA_MNvcRoIq";
 const kopaAdminDB=window.supabase.createClient(KOPALINK_SUPABASE_URL,KOPALINK_SUPABASE_KEY);
+
+// Shared loan settings: load after sign-in and listen for changes from other devices.
+let loanSettingsChannel=null;
+async function loadSharedLoanSettings(){
+  const {data:userData}=await kopaAdminDB.auth.getUser();
+  if(!userData?.user) return;
+  const {data,error}=await kopaAdminDB.from("loan_settings").select("settings").eq("id","default").maybeSingle();
+  if(error){console.error("Unable to load shared loan settings:",error.message);return;}
+  if(data?.settings){
+    localStorage.setItem(LOAN_SETTINGS_KEY,JSON.stringify({...DEFAULT_LOAN_SETTINGS,...data.settings}));
+    if(typeof renderAdminSettings==="function"){
+      const content=document.getElementById("adminContent");
+      if(content && content.innerHTML.includes("Settings")) renderAdminSettings();
+    }
+  }
+}
+function startLoanSettingsRealtime(){
+  if(loanSettingsChannel) kopaAdminDB.removeChannel(loanSettingsChannel);
+  loanSettingsChannel=kopaAdminDB.channel("kopalink-loan-settings-live")
+    .on("postgres_changes",{event:"*",schema:"public",table:"loan_settings",filter:"id=eq.default"},payload=>{
+      if(payload.new?.settings){
+        localStorage.setItem(LOAN_SETTINGS_KEY,JSON.stringify({...DEFAULT_LOAN_SETTINGS,...payload.new.settings}));
+        if(typeof renderAdminSettings==="function"){
+          const content=document.getElementById("adminContent");
+          if(content && content.innerHTML.includes("Settings")) renderAdminSettings();
+        }
+      }
+    }).subscribe();
+}
+kopaAdminDB.auth.onAuthStateChange((event,session)=>{
+  if(session){ setTimeout(()=>{loadSharedLoanSettings();startLoanSettingsRealtime();},0); }
+  else if(loanSettingsChannel){ kopaAdminDB.removeChannel(loanSettingsChannel);loanSettingsChannel=null; }
+});
 
 // Real Supabase Auth email for the KopaLink Administrator.
 // The login screen still asks only for Username + Password.
